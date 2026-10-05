@@ -58,11 +58,47 @@ function searchNext(){searchCollect();if(si<ss.length-1){si++;renderSearch()}els
 function searchBack(){if(si){si--;renderSearch()}else show("home")}
 function compatibility(t){let n=(t.exams||[]).includes(sd.exam)||(sd.exam==="M1 y M2"&&(t.exams||[]).includes("M1")&&(t.exams||[]).includes("M2"))?30:0;n+=Math.min(25,(sd.topics||[]).filter(x=>(t.topics||[]).includes(x)).length*8);if(sd.mod==="Ambas"||(t.modalities||[]).includes(sd.mod))n+=15;if(t.price_per_hour<=sd.budget)n+=15;if((t.availability||[]).includes(sd.time))n+=10;if(sd.target-sd.current>=100)n+=5;return Math.min(100,n)}
 async function findTeachers(){document.getElementById("searchForm").innerHTML="<p>Buscando profesores…</p>";const r=await db.from("teachers").select("*").eq("active",true);if(r.error){document.getElementById("searchMsg").innerHTML='<div class="err">'+esc(r.error.message)+"</div>";return}const a=r.data.map(t=>({...t,s:compatibility(t)})).sort((a,b)=>b.s-a.s);document.getElementById("results").innerHTML='<div class="card"><h2>'+a.length+' profesores encontrados</h2></div>'+a.map(t=>`<div class="card"><div class="profile"><div class="avatar">${ini(t.name)}</div><div><div class="score">${t.s}% compatible</div><h3>${esc(t.name)}</h3><p class="muted">${esc(t.bio||"Profesor/a de Matemática PAES.")}</p>${(t.exams||[]).map(x=>`<span class="tag">${esc(x)}</span>`).join("")}${(t.topics||[]).map(x=>`<span class="tag">${esc(x)}</span>`).join("")}<p><b>$${Number(t.price_per_hour).toLocaleString("es-CL")}</b> / hora · ${(t.modalities||[]).join(" / ")}</p><button class="primary" onclick="requestClass('${t.id}')">Solicitar clase</button></div></div></div>`).join("")}
-async function requestClass(tid){const {data:{user}}=await db.auth.getUser();if(!user){alert("Para solicitar una clase primero debes crear una cuenta o ingresar.");show("auth");return}await ensureProfile(user);const st=await db.from("students").select("id").eq("user_id",user.id).single();if(st.error){alert("No se pudo encontrar tu perfil de alumno.");return}const payload={student_id:st.data.id,teacher_id:tid,status:"pending",message:"Solicitud desde ProfeMatch",exam:sd.exam||null,current_score:sd.current||null,target_score:sd.target||null,topics:sd.topics||[],budget:sd.budget||null,modality:sd.mod||null,availability:sd.time||null};const q=await db.from("requests").insert([payload]);alert(q.error?"No se pudo enviar: "+q.error.message:"¡Solicitud enviada! El profesor podrá verla en su panel.");}
+async function getStudentProfile(user){
+  // Primero buscamos por el vínculo seguro user_id.
+  let q=await db.from("students").select("id,user_id,name,email").eq("user_id",user.id).maybeSingle();
+  if(q.data) return q.data;
+
+  // Respaldo para perfiles antiguos creados antes de Auth.
+  if(user.email){
+    const byEmail=await db.from("students").select("id,user_id,name,email").ilike("email",user.email).maybeSingle();
+    if(byEmail.data){
+      if(!byEmail.data.user_id || byEmail.data.user_id!==user.id){
+        const up=await db.from("students").update({user_id:user.id}).eq("id",byEmail.data.id);
+        if(!up.error) byEmail.data.user_id=user.id;
+      }
+      return byEmail.data;
+    }
+  }
+  return null;
+}
+
+async function requestClass(tid){
+  const {data:{user}}=await db.auth.getUser();
+  if(!user){alert("Para solicitar una clase primero debes crear una cuenta o ingresar.");show("auth");return}
+  await ensureProfile(user);
+  let student=await getStudentProfile(user);
+  if(!student){
+    // Último intento: crear el perfil y volver a buscarlo.
+    const ins=await db.from("students").insert([{user_id:user.id,name:user.user_metadata?.name||user.email,email:user.email}]).select("id,user_id,name,email").maybeSingle();
+    if(!ins.error && ins.data) student=ins.data;
+  }
+  if(!student){
+    alert("No se pudo encontrar tu perfil de alumno. Cierra sesión y vuelve a entrar. Si el problema continúa, revisaremos el permiso de students.");
+    return;
+  }
+  const payload={student_id:student.id,teacher_id:tid,status:"pending",message:"Solicitud desde ProfeMatch",exam:sd.exam||null,current_score:sd.current?Number(sd.current):null,target_score:sd.target?Number(sd.target):null,topics:sd.topics||[],budget:sd.budget?Number(sd.budget):null,modality:sd.mod||null,availability:sd.time||null};
+  const q=await db.from("requests").insert([payload]);
+  alert(q.error?"No se pudo enviar: "+q.error.message:"¡Solicitud enviada! El profesor podrá verla en su panel.");
+}
 async function loadTeacher(){const {data:{user}}=await db.auth.getUser();if(!user)return show("auth");const r=await db.from("teachers").select("*").eq("user_id",user.id).single();if(r.error){document.getElementById("teacherMsg").innerHTML='<div class="err">No se encontró tu perfil de profesor. Cierra sesión y vuelve a ingresar.</div>';return}const t=r.data;document.getElementById("teacherProfile").innerHTML=`<div class="profile"><div class="avatar">${ini(t.name)}</div><div><h3>${esc(t.name)}</h3><p>${esc(t.email||user.email)}</p><p><b>$${Number(t.price_per_hour||0).toLocaleString("es-CL")}</b> / hora · ${(t.modalities||[]).join(" / ")}</p>${(t.exams||[]).map(x=>`<span class="tag">${esc(x)}</span>`).join("")}${(t.topics||[]).map(x=>`<span class="tag">${esc(x)}</span>`).join("")}</div></div>`;const q=await db.from("requests").select("*").eq("teacher_id",t.id).order("created_at",{ascending:false});if(q.error){document.getElementById("requests").innerHTML='<div class="err">'+esc(q.error.message)+"</div>";return}if(!q.data.length){document.getElementById("requests").innerHTML="<p class='muted'>Todavía no tienes solicitudes.</p>";return}const ids=[...new Set(q.data.map(x=>x.student_id).filter(Boolean))];let students=[];if(ids.length){const sr=await db.from("students").select("id,name,email").in("id",ids);if(!sr.error)students=sr.data||[]}const sm=new Map(students.map(x=>[x.id,x]));document.getElementById("requests").innerHTML=q.data.map(x=>{const st=sm.get(x.student_id)||{};const score=studentCompatibility(x,t);return `<div class="matchcard"><div class="matchhead"><div><div class="matchname">${esc(st.name||"Alumno")}</div><div class="muted small">${esc(st.email||"")}</div></div><div class="matchscore">${score}%<div class="muted small">compatible</div></div></div><div class="matchgrid"><div class="matchitem">📚 <b>Examen</b><br>${esc(x.exam||"No indicado")}</div><div class="matchitem">🎯 <b>Puntaje</b><br>${x.current_score||"—"} → ${x.target_score||"—"}</div><div class="matchitem">🧮 <b>Temas</b><br>${esc((x.topics||[]).join(", ")||"No indicados")}</div><div class="matchitem">💰 <b>Presupuesto</b><br>${x.budget?'$'+Number(x.budget).toLocaleString("es-CL"):'No indicado'}</div><div class="matchitem">💻 <b>Modalidad</b><br>${esc(x.modality||"No indicada")}</div><div class="matchitem">🕐 <b>Horario</b><br>${esc(x.availability||"No indicado")}</div></div><p class="small">${esc(x.message||"El alumno solicita una clase.")}</p><span class="status">Estado: ${esc(x.status)}</span><div class="actions">${x.status==="pending"?`<button class="primary" onclick="setRequest('${x.id}','accepted')">Aceptar Match</button><button class="secondary" onclick="setRequest('${x.id}','rejected')">Rechazar</button>`:`<button class="secondary" onclick="setRequest('${x.id}','pending')">Volver a pendiente</button>`}</div></div>`}).join("")}
 function studentCompatibility(x,t){let n=0;if(x.exam&&((t.exams||[]).includes(x.exam)||(x.exam==="M1 y M2"&&(t.exams||[]).includes("M1")&&(t.exams||[]).includes("M2"))))n+=30;const common=(x.topics||[]).filter(v=>(t.topics||[]).includes(v)).length;n+=Math.min(25,common*8);if(x.modality&&((t.modalities||[]).includes(x.modality)||x.modality==="Ambas"))n+=15;if(x.budget&&t.price_per_hour<=x.budget)n+=15;if(x.availability&&(t.availability||[]).includes(x.availability))n+=10;return Math.min(100,n)}
 async function setRequest(id,status){const q=await db.from("requests").update({status}).eq("id",id);if(q.error)alert(q.error.message);else loadTeacher()}
-async function loadStudent(){const {data:{user}}=await db.auth.getUser();if(!user)return show("auth");const r=await db.from("students").select("*").eq("user_id",user.id).single();if(r.error)return;document.getElementById("studentProfile").innerHTML=`<p><b>${esc(r.data.name||user.user_metadata?.name||"Alumno")}</b></p><p class="muted">${esc(user.email)}</p>`;const q=await db.from("requests").select("*").eq("student_id",r.data.id).order("created_at",{ascending:false});document.getElementById("studentRequests").innerHTML=q.error?'<div class="err">'+esc(q.error.message)+"</div>":q.data.length?q.data.map(x=>`<div class="request"><b>Solicitud</b><p>Estado: <b>${esc(x.status)}</b></p></div>`).join(""):"<p class='muted'>No tienes solicitudes todavía.</p>"}
+async function loadStudent(){const {data:{user}}=await db.auth.getUser();if(!user)return show("auth");const student=await getStudentProfile(user);if(!student){document.getElementById("studentMsg").innerHTML='<div class="err">No se pudo cargar tu perfil de alumno.</div>';return}document.getElementById("studentProfile").innerHTML=`<p><b>${esc(student.name||user.user_metadata?.name||"Alumno")}</b></p><p class="muted">${esc(user.email)}</p>`;const q=await db.from("requests").select("*").eq("student_id",student.id).order("created_at",{ascending:false});document.getElementById("studentRequests").innerHTML=q.error?'<div class="err">'+esc(q.error.message)+"</div>":q.data.length?q.data.map(x=>`<div class="request"><b>Solicitud</b><p>Estado: <b>${esc(x.status)}</b></p></div>`).join(""):"<p class='muted'>No tienes solicitudes todavía.</p>"}
 async function editTeacher(){alert("La edición detallada del perfil será el siguiente ajuste. Por ahora puedes ver tu perfil y recibir solicitudes.")}
 db.auth.onAuthStateChange(()=>nav());nav();
 </script>
